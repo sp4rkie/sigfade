@@ -84,3 +84,7 @@ through untouched (bit-exact), and at `0.0` it is zeroed wholesale without a mul
   musical fade where an equal-power or logarithmic curve would sound smoother.
 - Signals are coalesced: two `SIGUSR1`s landing within the same buffer (~43 ms at the defaults)
   count as one toggle.
+
+## License
+
+Released into the public domain under [The Unlicense](LICENSE). Do whatever you like with it.
