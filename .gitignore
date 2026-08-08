@@ -1,0 +1,12 @@
+# build output
+sigfade
+
+# local audio test material (large, not source)
+*.wav
+*.mp3
+
+# editor
+*.swp
+
+# local Claude Code settings
+.claude/settings.local.json*
