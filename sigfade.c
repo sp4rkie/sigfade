@@ -1,12 +1,13 @@
 #include <stdio.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <unistd.h>
 #include <signal.h>
 #include <strings.h>
 
 #define SAMPLE_RATE 48000
 #define CHANNELS        2
-#define FADE_TIME       5         // in seconds
+#define FADE_TIME       5         // in seconds, default for -t
 
 volatile sig_atomic_t trigger_fade = 0;
 
@@ -16,13 +17,50 @@ sigusr1_handler(int sig)
     trigger_fade = 1;
 }
 
-int 
-main(void)
+void
+usage(const char *argv0)
+{
+    fprintf(stderr, "usage: %s [-i] [-x] [-t fade_seconds]\n", argv0);
+    exit(1);
+}
+
+int
+main(int argc, char **argv)
 {
     int16_t buffer[4096];
     size_t samples;
     double gain = 1;
-    double fade_step = 1.0 / (FADE_TIME * SAMPLE_RATE); // 0.000004
+    double fade_time = FADE_TIME;
+    double fade_step;
+    char *end;
+    int opt;
+    int fade_in = 0;
+    int exit_at_silence = 0;
+
+    while ((opt = getopt(argc, argv, "ixt:")) != -1) {
+        switch (opt) {
+            case 'i':
+                fade_in = 1;
+                break;
+            case 'x':
+                exit_at_silence = 1;
+                break;
+            case 't':
+                fade_time = strtod(optarg, &end);
+                // rejects trailing junk, zero, negatives and NaN
+                if (end == optarg || *end || !(fade_time > 0))
+                    usage(argv[0]);
+                break;
+            default:
+                usage(argv[0]);
+        }
+    }
+    if (optind != argc)
+        usage(argv[0]);
+
+    fade_step = 1.0 / (fade_time * SAMPLE_RATE); // 0.000004 at the default
+    if (fade_in)
+        gain = 0;   // start silent, step is already positive -> ramps up
 
     signal(SIGUSR1, sigusr1_handler);
 
@@ -34,9 +72,10 @@ main(void)
             gain += fade_step;
 fprintf(stderr, "\ntoggle fade_step direction: %f\n", fade_step);
         }
-        if (!gain) {
+        // steady state only if the ramp also points outwards
+        if (!gain && fade_step < 0) {
             bzero(buffer, sizeof(buffer));
-        } else if (gain == 1) {
+        } else if (gain == 1 && fade_step > 0) {
             // nothin to do
         } else {
             size_t i;
@@ -60,6 +99,8 @@ fprintf(stderr, "\n1's %zu\n", i);
             }
         }
         fwrite(buffer, sizeof(int16_t), samples, stdout);
+        if (exit_at_silence && !gain && fade_step < 0)
+            break;  // EOF lets the consumer drain its buffer and end by itself
     }
     return 0;
 }

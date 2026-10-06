@@ -29,6 +29,22 @@ sox track.wav -t raw -r 48000 -e signed -b 16 -c 2 - \
   | play -q -t raw -r 48000 -e signed -b 16 -c 2 -
 ```
 
+`-t seconds` sets how long a full sweep takes, overriding the compiled-in default; it accepts
+fractional values, so `./sigfade -t 0.25` gives a quick duck rather than a slow fade.
+
+`-i` starts silent and fades in, instead of starting at full gain. `-x` exits as soon as a fade-out
+reaches silence: the consumer sees EOF, plays out what it has buffered and ends by itself, and the
+producer dies of `SIGPIPE`. Together they make a player that fades in on start and fades out on
+one signal, without touching the system mixer:
+
+```sh
+sox track.mp3 -t raw -r 48000 -e signed -b 16 -c 2 - \
+  | ./sigfade -i -x -t 2 2>/dev/null \
+  | play -q -t raw -r 48000 -e signed -b 16 -c 2 - &
+# later: fade out over 2 s, then the whole pipeline ends
+pkill -USR1 sigfade
+```
+
 Then, from any other shell:
 
 ```sh
@@ -58,6 +74,9 @@ Defaults are 48000 Hz, stereo, 16-bit signed.
 | `SAMPLE_RATE` | `48000` | Frames per second              |
 | `CHANNELS`    | `2`     | Interleaved channels           |
 | `FADE_TIME`   | `5`     | Seconds for a full 0↔1 sweep   |
+
+`FADE_TIME` is only the default for `-t`, which overrides it per run. `SAMPLE_RATE` and `CHANNELS`
+have no flags — they have to agree with the pipeline, so changing them means recompiling.
 
 Raising `CHANNELS` needs more than editing the constant — the inner loop is written against a
 stereo frame and touches `buffer[i]` and `buffer[i + 1]` explicitly.
