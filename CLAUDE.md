@@ -34,7 +34,8 @@ sox hd_ultra_22-06-14_67.wav -t raw -r 48000 -e signed -b 16 -c 2 - \
 
 `-t seconds` overrides `FADE_TIME` for that run; anything else on the command line, a
 non-numeric argument, or a value that is not strictly positive exits 1 with a usage line.
-`-i` starts at gain 0 (fade in), `-x` exits once a fade-out reaches 0.
+`-i` starts at gain 0 (fade in), `-x` exits once a fade-out reaches 0, `-p bytes` shrinks the
+output pipe (`F_SETPIPE_SZ`) and unbuffers stdout to cut fade latency.
 
 Trigger a fade from another shell:
 
@@ -76,6 +77,12 @@ leave them out of commits.
   mechanism for the p-server player on the phones (`~/bin/p` there, `fade_kill()`): it sends one
   `SIGUSR1` and returns at once; the next tune is started with `-i` meanwhile, which makes every
   user skip/stop a crossfade. Nothing waits on the old pipeline — it ends itself.
+
+- **Latency lives downstream.** The output pipe is always full, so its size (64 KB default ≈
+  340 ms) is pure delay before a fade is heard; `-p` shrinks it. `setvbuf(stdout, _IONBF)` goes
+  with it, otherwise stdio's buffer re-adds what the pipe saved. `BUF_SAMPLES` (1024) bounds how
+  late a signal is noticed. `sizeof(buffer)` follows `BUF_SAMPLES` — keep using it, never a
+  literal. The `!(i & 0x7ff)` trace now fires once per read (i stays below 1024).
 
 ## Conventions
 

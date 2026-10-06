@@ -45,6 +45,23 @@ sox track.mp3 -t raw -r 48000 -e signed -b 16 -c 2 - \
 pkill -USR1 sigfade
 ```
 
+## Latency: hearing the fade sooner
+
+A fade only becomes audible once everything buffered *after* `sigfade` has played out — audio still
+waiting upstream is not faded yet, so it costs nothing. The pipe to the consumer is always full
+(`sigfade` writes ahead), and at Linux's default 64 KB that alone is ~340 ms at 48 kHz stereo.
+`-p bytes` shrinks it (`F_SETPIPE_SZ`, rounded up to a page) and makes `sigfade`'s stdout
+unbuffered. Give the consumer a small buffer too:
+
+```sh
+... | ./sigfade -x -t 2 -p 4096 2>/dev/null \
+    | play -q --buffer 1024 -t raw -r 48000 -e signed -b 16 -c 2 -
+```
+
+Measured on an Android phone (Termux, PulseAudio), signal to silence went from ~690 ms to ~250 ms;
+~190 ms of the rest is the audio sink itself, which `PULSE_LATENCY_MSEC` does not change there.
+The price is less slack against scheduling hiccups — raise `-p` if playback stutters.
+
 Then, from any other shell:
 
 ```sh
@@ -74,6 +91,7 @@ Defaults are 48000 Hz, stereo, 16-bit signed.
 | `SAMPLE_RATE` | `48000` | Frames per second              |
 | `CHANNELS`    | `2`     | Interleaved channels           |
 | `FADE_TIME`   | `5`     | Seconds for a full 0↔1 sweep   |
+| `BUF_SAMPLES` | `1024`  | Samples per read (~10 ms); a signal is honored at the next read |
 
 `FADE_TIME` is only the default for `-t`, which overrides it per run. `SAMPLE_RATE` and `CHANNELS`
 have no flags — they have to agree with the pipeline, so changing them means recompiling.
@@ -101,7 +119,7 @@ through untouched (bit-exact), and at `0.0` it is zeroed wholesale without a mul
 - 16-bit signed PCM only.
 - Fade curve is linear in amplitude, not perceptual — fine for ducking, less ideal for a slow
   musical fade where an equal-power or logarithmic curve would sound smoother.
-- Signals are coalesced: two `SIGUSR1`s landing within the same buffer (~43 ms at the defaults)
+- Signals are coalesced: two `SIGUSR1`s landing within the same buffer (~10 ms at the defaults)
   count as one toggle.
 
 ## License
