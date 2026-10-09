@@ -75,8 +75,8 @@ leave them out of commits.
 - **`-x` breaks the read loop *after* the `fwrite`** of the buffer in which gain hit 0, so the
   tail of the ramp (and the zeroed rest) still reaches the consumer. Exiting is the whole stop
   mechanism for the p-server player on the phones (`~/bin/p` there, `fade_kill()`): it sends one
-  `SIGUSR1` and returns at once; the next tune is started with `-i` meanwhile, which makes every
-  user skip/stop a crossfade. Nothing waits on the old pipeline — it ends itself.
+  `SIGUSR1` and returns at once; the next tune starts meanwhile at full gain (its tunes are
+  pre-faded, so p never uses `-i`), which makes every user skip/stop a crossfade. Nothing waits on the old pipeline — it ends itself.
 
 - **Latency lives downstream.** The output pipe is always full, so its size (64 KB default ≈
   340 ms) is pure delay before a fade is heard; `-p` shrinks it. `setvbuf(stdout, _IONBF)` goes

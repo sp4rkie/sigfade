@@ -45,6 +45,12 @@ sox track.mp3 -t raw -r 48000 -e signed -b 16 -c 2 - \
 pkill -USR1 sigfade
 ```
 
+Because `-x` lets a signalled pipeline end by itself, a crossfade needs no coordination: signal
+the old pipeline's `sigfade` and start the next one right away. The two play side by side while the
+old one fades out, and the sound server mixes them. Signal by PID (`kill -USR1 <pid>`), not
+`pkill`, once more than one pipeline can be running. Give the new pipeline `-i` too if its source
+does not already start quietly.
+
 ## Latency: hearing the fade sooner
 
 A fade only becomes audible once everything buffered *after* `sigfade` has played out — audio still
