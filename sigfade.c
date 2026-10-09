@@ -10,20 +10,28 @@
 #define SAMPLE_RATE 48000
 #define CHANNELS        2
 #define FADE_TIME       5         // in seconds, default for -t
-#define BUF_SAMPLES  1024         // per read; SIGUSR1 is honored at the next read => ~10ms
+#define DUCK_TIME     0.5         // in seconds, default for -u
+#define DUCK_LEVEL      0         // gain while ducked, default for -d
+#define BUF_SAMPLES  1024         // per read; a signal is honored at the next read => ~10ms
 
-volatile sig_atomic_t trigger_fade = 0;
+// counted, not flagged: two signals between reads must cancel, not collapse into one.
+// only the handler writes these; the loop compares them against its own seen counts
+volatile sig_atomic_t usr1_count = 0;
+volatile sig_atomic_t usr2_count = 0;
 
 void 
-sigusr1_handler(int sig)
+signal_handler(int sig)
 {
-    trigger_fade = 1;
+    if (sig == SIGUSR1)
+        ++usr1_count;
+    else
+        ++usr2_count;
 }
 
 void
 usage(const char *argv0)
 {
-    fprintf(stderr, "usage: %s [-i] [-x] [-t fade_seconds] [-p pipe_bytes]\n", argv0);
+    fprintf(stderr, "usage: %s [-i] [-x] [-t fade_seconds] [-u duck_seconds] [-d duck_level] [-p pipe_bytes]\n", argv0);
     exit(1);
 }
 
@@ -33,15 +41,22 @@ main(int argc, char **argv)
     int16_t buffer[BUF_SAMPLES];
     size_t samples;
     double gain = 1;
+    double target;                  // gain moves towards this by step per frame
+    double step;
     double fade_time = FADE_TIME;
-    double fade_step;
+    double duck_time = DUCK_TIME;
+    double duck_level = DUCK_LEVEL;
+    double fade_step, duck_step;
+    int faded_out = 0;              // toggled by SIGUSR1
+    int ducked = 0;                 // toggled by SIGUSR2
+    sig_atomic_t usr1_seen = 0, usr2_seen = 0, n;
     char *end;
     int opt;
     int fade_in = 0;
     int exit_at_silence = 0;
     long pipe_size = 0;
 
-    while ((opt = getopt(argc, argv, "ixt:p:")) != -1) {
+    while ((opt = getopt(argc, argv, "ixt:u:d:p:")) != -1) {
         switch (opt) {
             case 'i':
                 fade_in = 1;
@@ -60,6 +75,16 @@ main(int argc, char **argv)
                 if (end == optarg || *end || !(fade_time > 0))
                     usage(argv[0]);
                 break;
+            case 'u':
+                duck_time = strtod(optarg, &end);
+                if (end == optarg || *end || !(duck_time > 0))
+                    usage(argv[0]);
+                break;
+            case 'd':
+                duck_level = strtod(optarg, &end);
+                if (end == optarg || *end || !(duck_level >= 0 && duck_level <= 1))
+                    usage(argv[0]);
+                break;
             default:
                 usage(argv[0]);
         }
@@ -68,10 +93,14 @@ main(int argc, char **argv)
         usage(argv[0]);
 
     fade_step = 1.0 / (fade_time * SAMPLE_RATE); // 0.000004 at the default
+    duck_step = 1.0 / (duck_time * SAMPLE_RATE); // a full 0..1 sweep, a shallower duck is quicker
+    step = fade_step;
+    target = 1;
     if (fade_in)
-        gain = 0;   // start silent, step is already positive -> ramps up
+        gain = 0;   // start silent -> ramps up to target
 
-    signal(SIGUSR1, sigusr1_handler);
+    signal(SIGUSR1, signal_handler);
+    signal(SIGUSR2, signal_handler);
 
     if (pipe_size) {
         // the pipe to the consumer is always full, so its size is pure fade latency.
@@ -84,40 +113,63 @@ fprintf(stderr, "pipe size: %d\n", fcntl(STDOUT_FILENO, F_GETPIPE_SZ));
 
     // 512 per channel at rate 48000 => .0107s per buffer
     while ((samples = fread(buffer, sizeof(int16_t), BUF_SAMPLES, stdin)) > 0) {
-        if (trigger_fade) {
-            trigger_fade = 0;
-            fade_step = -fade_step; // reverse current fade direction but keep size
-            gain += fade_step;
-fprintf(stderr, "\ntoggle fade_step direction: %f\n", fade_step);
+        if ((n = usr1_count - usr1_seen)) {
+            usr1_seen += n;
+            if (n & 1)
+                faded_out = !faded_out;
+            step = fade_step;
+fprintf(stderr, "\nfade %s\n", faded_out ? "out" : "in");
         }
-        // steady state only if the ramp also points outwards
-        if (!gain && fade_step < 0) {
-            bzero(buffer, sizeof(buffer));
-        } else if (gain == 1 && fade_step > 0) {
-            // nothin to do
+        if ((n = usr2_count - usr2_seen)) {
+            usr2_seen += n;
+            if (n & 1)
+                ducked = !ducked;
+            if (!faded_out)
+                step = duck_step;   // a fade-out in progress keeps its own pace
+fprintf(stderr, "\n%s\n", ducked ? "duck" : "unduck");
+        }
+        target = faded_out ? 0 : ducked ? duck_level : 1;
+
+        if (gain == target) {
+            // steady state
+            if (!gain) {
+                bzero(buffer, sizeof(buffer));
+            } else if (gain != 1) {
+                size_t i;
+                for (i = 0; i < samples; ++i)
+                    buffer[i] = (int16_t)(buffer[i] * gain);
+            }
         } else {
             size_t i;
             for (i = 0; i < samples; i += CHANNELS) {
                 buffer[i]     = (int16_t)(buffer[i]     * gain);
                 buffer[i + 1] = (int16_t)(buffer[i + 1] * gain);
-                gain += fade_step;
+                if (gain < target) {
+                    gain += step;
+                    if (gain > target)
+                        gain = target;  // clamped, so gain == target is exact
+                } else if (gain > target) {
+                    gain -= step;
+                    if (gain < target)
+                        gain = target;
+                }
 if (!(i & 0x7ff)) fprintf(stderr, "[ %f ]", gain);
-                if (gain <= 0) {
-                    gain = 0;
-fprintf(stderr, "\n0's %zu\n", i);
-                    // zero out what's been left over
-                    bzero(&buffer[i], sizeof(buffer) - i * sizeof(int16_t));
-                    break;
-                } else if (gain >= 1) {
-                    gain = 1;
-fprintf(stderr, "\n1's %zu\n", i);
-                    // nothing more left to do
+                if (gain == target) {
+fprintf(stderr, "\nreached %f at %zu\n", gain, i);
+                    i += CHANNELS;
+                    if (!gain) {
+                        // zero out what's been left over
+                        bzero(&buffer[i], sizeof(buffer) - i * sizeof(int16_t));
+                    } else if (gain != 1) {
+                        for (; i < samples; ++i)
+                            buffer[i] = (int16_t)(buffer[i] * gain);
+                    }
                     break;
                 }
             }
         }
         fwrite(buffer, sizeof(int16_t), samples, stdout);
-        if (exit_at_silence && !gain && fade_step < 0)
+        if (exit_at_silence && faded_out && !gain)
             break;  // EOF lets the consumer drain its buffer and end by itself
     }
     return 0;

@@ -1,6 +1,7 @@
 # sigfade
 
-A tiny C filter that fades a raw PCM audio stream up or down when you send it `SIGUSR1`.
+A tiny C filter that fades a raw PCM audio stream up or down when you send it `SIGUSR1`, and
+ducks it for a moment when you send it `SIGUSR2`.
 
 It sits in the middle of a pipe — typically a [SoX](https://sox.sourceforge.net/) pipeline — reads
 raw interleaved 16-bit signed PCM on stdin, applies a gain envelope, and writes the same format to
@@ -51,6 +52,23 @@ old one fades out, and the sound server mixes them. Signal by PID (`kill -USR1 <
 `pkill`, once more than one pipeline can be running. Give the new pipeline `-i` too if its source
 does not already start quietly.
 
+## Ducking: `SIGUSR2`
+
+`SIGUSR2` toggles a duck, independent of the `SIGUSR1` fade: the first one takes the gain down to
+the duck level, the next one brings it back. `-d level` sets that level (0 to 1, default 0 =
+silent), `-u seconds` how long a full 0↔1 sweep takes while ducking (default 0.5, so ducking to
+0.2 takes 0.4 s). The stream keeps flowing underneath — nothing is paused, so a player that
+scheduled the end of the track needs no correction afterwards:
+
+```sh
+kill -USR2 <pid>; sleep .75   # duck, wait until it is heard
+termux-tts-speak "dinner is ready"
+kill -USR2 <pid>              # back up
+```
+
+A `SIGUSR1` fade-out wins over a duck: it ramps from wherever the gain is down to 0 at the `-t`
+pace, and `-x` exits there as usual. A duck to 0 does not trigger `-x`.
+
 ## Latency: hearing the fade sooner
 
 A fade only becomes audible once everything buffered *after* `sigfade` has played out — audio still
@@ -97,9 +115,12 @@ Defaults are 48000 Hz, stereo, 16-bit signed.
 | `SAMPLE_RATE` | `48000` | Frames per second              |
 | `CHANNELS`    | `2`     | Interleaved channels           |
 | `FADE_TIME`   | `5`     | Seconds for a full 0↔1 sweep   |
+| `DUCK_TIME`   | `0.5`   | Seconds for a full 0↔1 sweep while ducking |
+| `DUCK_LEVEL`  | `0`     | Gain while ducked              |
 | `BUF_SAMPLES` | `1024`  | Samples per read (~10 ms); a signal is honored at the next read |
 
-`FADE_TIME` is only the default for `-t`, which overrides it per run. `SAMPLE_RATE` and `CHANNELS`
+`FADE_TIME`, `DUCK_TIME` and `DUCK_LEVEL` are only the defaults for `-t`, `-u` and `-d`, which
+override them per run. `SAMPLE_RATE` and `CHANNELS`
 have no flags — they have to agree with the pipeline, so changing them means recompiling.
 
 Raising `CHANNELS` needs more than editing the constant — the inner loop is written against a
@@ -107,17 +128,17 @@ stereo frame and touches `buffer[i]` and `buffer[i + 1]` explicitly.
 
 ## How it works
 
-The gain is a single `double` carried across buffer boundaries, stepped by
-`1.0 / (FADE_TIME * SAMPLE_RATE)` once per frame, so the ramp stays continuous across reads rather
-than restarting every buffer.
+The gain is a single `double` carried across buffer boundaries. It moves towards a target once
+per frame, by `1.0 / (FADE_TIME * SAMPLE_RATE)` or, while ducking, `1.0 / (DUCK_TIME *
+SAMPLE_RATE)`, so the ramp stays continuous across reads rather than restarting every buffer.
 
-`SIGUSR1` negates that step instead of setting a target. Direction flips, magnitude is preserved,
-and the sign of the step *is* the state — there is no separate "fading in" / "fading out" flag to
-keep in sync.
+The signals only flip two flags, faded-out and ducked, and the target follows from them: 0 when
+faded out, the duck level when ducked, 1 otherwise. A signal mid-ramp therefore reverses from
+wherever the gain currently sits instead of snapping to an endpoint.
 
-Gain is clamped to exactly `0.0` and `1.0`, which makes the two steady states exact
-double comparisons by construction. They double as fast paths: at `1.0` the buffer is passed
-through untouched (bit-exact), and at `0.0` it is zeroed wholesale without a multiply.
+The gain is clamped to exactly the target, which makes the steady state an exact double
+comparison by construction. At `1.0` the buffer is passed through untouched (bit-exact), at `0.0`
+it is zeroed wholesale without a multiply.
 
 ## Limitations
 
@@ -125,8 +146,9 @@ through untouched (bit-exact), and at `0.0` it is zeroed wholesale without a mul
 - 16-bit signed PCM only.
 - Fade curve is linear in amplitude, not perceptual — fine for ducking, less ideal for a slow
   musical fade where an equal-power or logarithmic curve would sound smoother.
-- Signals are coalesced: two `SIGUSR1`s landing within the same buffer (~10 ms at the defaults)
-  count as one toggle.
+- Signals are counted per buffer, so two toggles between two reads cancel out. Two signals of
+  the same kind sent at the *same instant*, before the handler has run, are merged into one by the
+  kernel — that is how standard signals work.
 
 ## License
 
